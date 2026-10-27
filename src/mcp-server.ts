@@ -247,46 +247,10 @@ export class WhoopMcpServer {
             },
           },
           {
-            name: 'whoop-exchange-code-for-token',
-            description: 'Exchange authorization code for access token',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                code: {
-                  type: 'string',
-                  description: 'Authorization code from OAuth callback',
-                },
-              },
-              required: ['code'],
-            },
-          },
-          {
-            name: 'whoop-refresh-token',
-            description: 'Refresh access token using refresh token',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                refreshToken: {
-                  type: 'string',
-                  description: 'Refresh token to use for getting new access token',
-                },
-              },
-              required: ['refreshToken'],
-            },
-          },
-          {
-            name: 'whoop-set-access-token',
-            description: 'Set the access token for API calls',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                accessToken: {
-                  type: 'string',
-                  description: 'Access token to use for API calls',
-                },
-              },
-              required: ['accessToken'],
-            },
+            name: 'whoop-get-daily-readiness',
+            description:
+              "Latest recovery (recovery %, HRV rmssd ms, resting HR, SpO2, skin temp), last night's sleep (hours, performance %), and 28-day average HRV and resting HR for baseline comparison. Use this each morning for training decisions.",
+            inputSchema: { type: 'object', properties: {}, required: [] },
           },
         ] as Tool[],
       };
@@ -494,49 +458,49 @@ export class WhoopMcpServer {
             };
           }
 
-          case 'whoop-exchange-code-for-token': {
-            if (!args || typeof args.code !== 'string') {
-              throw new Error('code is required and must be a string');
+          case 'whoop-get-daily-readiness': {
+            const start = new Date(Date.now() - 28 * 86400_000).toISOString();
+            const recs = [];
+            let nextToken: string | undefined;
+            for (let i = 0; i < 3; i++) {
+              const page = await this.whoopClient.getRecoveryCollection({ limit: 25, start, nextToken });
+              recs.push(...page.records);
+              nextToken = page.next_token;
+              if (!nextToken) break;
             }
-            const result = await this.whoopClient.exchangeCodeForToken(args.code);
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify(result, null, 2),
-                },
-              ],
+            const scored = recs.filter((r) => r.score);
+            const avg = (f: (r: (typeof scored)[number]) => number) =>
+              scored.length ? Math.round((scored.reduce((t, r) => t + f(r), 0) / scored.length) * 10) / 10 : null;
+            const sleeps = await this.whoopClient.getSleepCollection({ limit: 5 });
+            const sleep = sleeps.records.find((x) => !x.nap && x.score);
+            const hours = (ms: number) => Math.round((ms / 3_600_000) * 100) / 100;
+            const latest = scored[0];
+            const result = {
+              latest_recovery: latest && {
+                date: latest.created_at,
+                recovery_score_pct: latest.score!.recovery_score,
+                hrv_rmssd_ms: latest.score!.hrv_rmssd_milli,
+                resting_heart_rate: latest.score!.resting_heart_rate,
+                spo2_pct: latest.score!.spo2_percentage,
+                skin_temp_c: latest.score!.skin_temp_celsius,
+              },
+              latest_sleep: sleep && {
+                start: sleep.start,
+                end: sleep.end,
+                hours_in_bed_minus_awake: hours(
+                  sleep.score!.stage_summary.total_in_bed_time_milli - sleep.score!.stage_summary.total_awake_time_milli
+                ),
+                performance_pct: sleep.score!.sleep_performance_percentage,
+                efficiency_pct: sleep.score!.sleep_efficiency_percentage,
+              },
+              baseline_28d: {
+                days_with_data: scored.length,
+                avg_hrv_rmssd_ms: avg((r) => r.score!.hrv_rmssd_milli),
+                avg_resting_heart_rate: avg((r) => r.score!.resting_heart_rate),
+                avg_recovery_score_pct: avg((r) => r.score!.recovery_score),
+              },
             };
-          }
-
-          case 'whoop-refresh-token': {
-            if (!args || typeof args.refreshToken !== 'string') {
-              throw new Error('refreshToken is required and must be a string');
-            }
-            const result = await this.whoopClient.refreshToken(args.refreshToken);
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify(result, null, 2),
-                },
-              ],
-            };
-          }
-
-          case 'whoop-set-access-token': {
-            if (!args || typeof args.accessToken !== 'string') {
-              throw new Error('accessToken is required and must be a string');
-            }
-            this.whoopClient.setAccessToken(args.accessToken);
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: 'Access token set successfully',
-                },
-              ],
-            };
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
           }
 
           default:

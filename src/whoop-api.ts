@@ -13,6 +13,7 @@ import {
   WhoopWorkoutCollection,
   PaginationParams
 } from './types.js';
+import { loadTokens, saveTokens } from './token-store.js';
 
 export class WhoopApiClient {
   private client: AxiosInstance;
@@ -27,12 +28,37 @@ export class WhoopApiClient {
       },
     });
 
-    // Add request interceptor to include access token
-    this.client.interceptors.request.use((config) => {
-      if (this.config.accessToken) {
-        config.headers.Authorization = `Bearer ${this.config.accessToken}`;
+    // Add request interceptor to include a valid access token (refreshing it if needed)
+    this.client.interceptors.request.use(async (config) => {
+      const token = await this.getValidToken();
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
       }
       return config;
+    });
+  }
+
+  private refreshing: Promise<string | undefined> | null = null;
+
+  private async getValidToken(): Promise<string | undefined> {
+    const stored = loadTokens();
+    if (!stored) return this.config.accessToken;
+    if (stored.expires_at - Date.now() > 60_000) return stored.access_token;
+    if (!stored.refresh_token) return stored.access_token;
+    // Refresh tokens rotate, so share one in-flight refresh between concurrent calls.
+    this.refreshing ??= this.refreshToken(stored.refresh_token)
+      .then((t) => t.access_token)
+      .finally(() => {
+        this.refreshing = null;
+      });
+    return this.refreshing;
+  }
+
+  private persist(t: { access_token: string; refresh_token?: string; expires_in: number }, previousRefresh?: string) {
+    saveTokens({
+      access_token: t.access_token,
+      refresh_token: t.refresh_token ?? previousRefresh,
+      expires_at: Date.now() + t.expires_in * 1000,
     });
   }
 
@@ -142,7 +168,7 @@ export class WhoopApiClient {
       client_id: this.config.clientId,
       redirect_uri: this.config.redirectUri,
       response_type: 'code',
-      scope: 'read:recovery read:cycles read:workout read:sleep read:profile read:body_measurement'
+      scope: 'read:recovery read:cycles read:workout read:sleep read:profile read:body_measurement offline'
     });
     
     if (state) {
@@ -166,6 +192,7 @@ export class WhoopApiClient {
       }
     });
 
+    this.persist(response.data);
     return response.data;
   }
 
@@ -182,6 +209,7 @@ export class WhoopApiClient {
       }
     });
 
+    this.persist(response.data, refreshToken);
     return response.data;
   }
 }
