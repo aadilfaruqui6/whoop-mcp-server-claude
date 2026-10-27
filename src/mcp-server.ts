@@ -249,7 +249,7 @@ export class WhoopMcpServer {
           {
             name: 'whoop-get-daily-readiness',
             description:
-              "Latest recovery (recovery %, HRV rmssd ms, resting HR, SpO2, skin temp), last night's sleep (hours, performance %), and 28-day average HRV and resting HR for baseline comparison. Use this each morning for training decisions.",
+              "Latest recovery (recovery %, HRV rmssd ms, resting HR, SpO2, skin temp), last night's sleep (hours, performance %), yesterday's total energy burn in kcal and day strain (use as the maintenance-calorie anchor), tonight's WHOOP sleep need in hours, and 28-day average HRV and resting HR for baseline comparison. Use this each morning for training decisions.",
             inputSchema: { type: 'object', properties: {}, required: [] },
           },
         ] as Tool[],
@@ -475,6 +475,9 @@ export class WhoopMcpServer {
             const sleep = sleeps.records.find((x) => !x.nap && x.score);
             const hours = (ms: number) => Math.round((ms / 3_600_000) * 100) / 100;
             const latest = scored[0];
+            const cycles = await this.whoopClient.getCycleCollection({ limit: 3 });
+            const done = cycles.records.find((c) => c.end && c.score);
+            const need = sleep?.score?.sleep_needed;
             const result = {
               latest_recovery: latest && {
                 date: latest.created_at,
@@ -493,6 +496,14 @@ export class WhoopMcpServer {
                 performance_pct: sleep.score!.sleep_performance_percentage,
                 efficiency_pct: sleep.score!.sleep_efficiency_percentage,
               },
+              yesterday_energy: done && {
+                cycle_start: done.start,
+                total_kcal: Math.round(done.score.kilojoule / 4.184),
+                day_strain: done.score.strain,
+              },
+              sleep_need_tonight_hours: need && hours(
+                need.baseline_milli + need.need_from_sleep_debt_milli + need.need_from_recent_strain_milli - need.need_from_recent_nap_milli
+              ),
               baseline_28d: {
                 days_with_data: scored.length,
                 avg_hrv_rmssd_ms: avg((r) => r.score!.hrv_rmssd_milli),
